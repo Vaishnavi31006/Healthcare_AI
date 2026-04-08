@@ -1,0 +1,139 @@
+# openenv.yaml
+# OpenEnv-compatible environment metadata for the AI Healthcare Assistant RL project.
+# This file is required for hackathon submission and describes the environment
+# contract so judges and external tooling can introspect it without reading code.
+
+name: ai-healthcare-assistant
+version: "1.0.0"
+description: >
+  A simulated episodic reinforcement learning environment for medical triage.
+  An agent observes structured patient states (symptoms, severity, demographics)
+  and selects from 8 discrete clinical guidance actions. Rewards are normalised
+  to [0, 1] and shaped to penalise both under- and over-reaction, addressing
+  reward-hacking concerns. Three difficulty tasks (easy / medium / hard) provide
+  increasing clinical complexity, each evaluated with a deterministic reward
+  system that grades correctness between 0 and 1.
+
+# -- Interface ----------------------------------------------------------------
+interface: openenv          # Follows OpenEnv state-action-reward contract
+entry_point: inference.py
+inference_function: main()
+state_method: state()       # HealthcareEnv.state() returns current State
+
+# -- Observation Space --------------------------------------------------------
+observations:
+  type: structured
+  model: State              # Pydantic BaseModel
+  fields:
+    symptoms:
+      type: "list[str]"
+      description: One or more symptoms drawn from a 17-item clinical pool.
+      example: ["fever", "cough", "fatigue"]
+    severity:
+      type: str
+      values: [mild, moderate, severe]
+    duration_days:
+      type: int
+      range: [1, 14]
+    age_group:
+      type: str
+      values: [child, adult, elderly]
+    has_chronic_condition:
+      type: bool
+    step:
+      type: int
+      description: Current timestep within the episode.
+
+# -- Action Space -------------------------------------------------------------
+actions:
+  type: discrete
+  n: 8
+  model: Action             # Pydantic BaseModel
+  labels:
+    0: home_care            # Recommend rest, hydration, OTC medication
+    1: monitor              # Advise monitoring symptoms for 24-48 hours
+    2: gp_visit             # Schedule a GP appointment
+    3: urgent_care          # Urgent care within hours  [TERMINAL]
+    4: emergency            # Go to the ER immediately  [TERMINAL]
+    5: specialist           # Refer to a medical specialist
+    6: telehealth           # Suggest a telehealth consultation
+    7: medication_check     # Review medications with a pharmacist
+  terminal_actions: [3, 4]
+  accessor: get_action_labels()   # Returns {id: {label, description}} dict
+
+# -- Reward -------------------------------------------------------------------
+reward:
+  range: [0.0, 1.0]
+  normalisation: "(raw_reward + 2) / 4   where raw in [-2.0, 2.0]"
+  semantics:
+    "1.0": Clinically correct and optimal action for the observed state
+    "0.5": Partially correct or acceptable but suboptimal action
+    "0.0": Dangerous or inappropriate (unsafe under- or over-reaction)
+  anti_reward_hacking: >
+    The reward function symmetrically penalises both under-reaction (dismissing
+    severe symptoms) and over-reaction (escalating mild cases to emergency),
+    preventing the agent from exploiting a one-sided signal.
+
+# -- Episode ------------------------------------------------------------------
+episode:
+  max_steps: 5
+  termination: terminal_action_taken OR max_steps_reached
+  result_model: StepResult  # Pydantic BaseModel: next_state, reward, done, info
+
+# -- Tasks / Difficulty Tiers -------------------------------------------------
+# Each difficulty level is a separate task with its own fixed initial State.
+# All three share the same action space and reward function; complexity
+# increases through symptom count, severity, age risk, and chronic conditions.
+tasks:
+  easy:
+    description: >
+      Mild single-symptom case in a healthy adult. The correct action is
+      home_care (action 0), yielding a reward close to 1.0.
+    severity: mild
+    symptoms: [runny_nose]
+    age_group: adult
+    has_chronic_condition: false
+    expected_action: home_care
+    reward_for_correct: 1.0
+
+  medium:
+    description: >
+      Moderate multi-symptom case in an adult without chronic conditions.
+      Correct actions are gp_visit (2) or telehealth (6), both scoring >= 0.875.
+    severity: moderate
+    symptoms: [fever, headache, fatigue]
+    age_group: adult
+    has_chronic_condition: false
+    expected_actions: [gp_visit, telehealth]
+    reward_for_correct: 0.875
+
+  hard:
+    description: >
+      Severe presentation in an elderly patient with a chronic condition.
+      Only emergency (4) scores the maximum reward of 1.0; any lower
+      escalation is penalised, reflecting real clinical risk.
+    severity: severe
+    symptoms: [chest_pain, shortness_of_breath, palpitations, dizziness]
+    age_group: elderly
+    has_chronic_condition: true
+    expected_action: emergency
+    reward_for_correct: 1.0
+
+# -- Runtime ------------------------------------------------------------------
+runtime:
+  language: python
+  min_version: "3.10"
+  dependencies:
+    - pydantic       # BaseModel for State, Action, StepResult
+    - openai         # OpenAI client used in inference.py
+    - flask          # Web server for HF Spaces app.py
+
+# -- Deployment ---------------------------------------------------------------
+deployment:
+  containerization_ready: true
+  huggingface_spaces_ready: true
+  notes: >
+    Single-file entry point with one external dependency (pydantic), designed
+    for containerisation. A minimal Dockerfile and a Gradio/Streamlit wrapper
+    for Hugging Face Spaces can be added without modifying core environment
+    logic. See README for details.
